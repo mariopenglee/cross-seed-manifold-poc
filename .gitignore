@@ -1,0 +1,24 @@
+# python
+__pycache__/
+*.py[cod]
+
+# marimo session cache
+__marimo__/
+*.egg-info/
+.ipynb_checkpoints/
+
+# environments
+.venv/
+venv/
+env/
+
+# local run artifacts (results/ is committed; checkpoints + scratch are not)
+checkpoints/
+cache/
+*.pt
+
+# local-only writeup / notes (kept out of the public repo)
+_local/
+
+# os
+.DS_Store

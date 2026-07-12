@@ -1,0 +1,18 @@
+benchmark d=128 c=256 total dims=640  data (20000, 128)
+
+cell exp4 (atoms/dim 0.80) k16:  union N*k active=48  ctrl_Nk k'=48  alive ctrl_k=1.00 ctrl_Nk=1.00
+          shape  single   union  ctrl_k  ctrl_Nk    U-ck   U-cNk
+         circle   0.282   0.378   0.380    0.144  -0.002  +0.233
+     swiss_roll   0.273   0.367   0.381    0.190  -0.015  +0.177
+
+cell exp8 (atoms/dim 1.60) k8:  union N*k active=24  ctrl_Nk k'=24  alive ctrl_k=1.00 ctrl_Nk=1.00
+          shape  single   union  ctrl_k  ctrl_Nk    U-ck   U-cNk
+         circle   0.634   0.772   0.499    0.201  +0.272  +0.571
+     swiss_roll   0.522   0.636   0.417    0.187  +0.219  +0.449
+
+cell exp8 (atoms/dim 1.60) k16:  union N*k active=48  ctrl_Nk k'=48  alive ctrl_k=1.00 ctrl_Nk=1.00
+          shape  single   union  ctrl_k  ctrl_Nk    U-ck   U-cNk
+         circle   0.378   0.538   0.294    0.146  +0.244  +0.392
+     swiss_roll   0.364   0.475   0.194    0.140  +0.282  +0.335
+
+total 273s

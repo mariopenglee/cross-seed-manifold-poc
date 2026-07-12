@@ -1,0 +1,23 @@
+benchmark d=128 c=256 total dims=640  data (20000, 128)
+
+cell exp4 (d_sae 512, atoms/dim 0.80) k8:  alive seed=1.00 ctrl=1.00  -> eff atoms ctrl=1536 union=1536  (of 1536)
+          shape  single  U_diff  U_same    ctrl    Ud-C    Us-C   Ud-Us
+         circle   0.385   0.560   0.505   0.567  -0.008  -0.062  +0.054
+     swiss_roll   0.464   0.600   0.556   0.516  +0.085  +0.040  +0.045
+
+cell exp4 (d_sae 512, atoms/dim 0.80) k16:  alive seed=1.00 ctrl=1.00  -> eff atoms ctrl=1536 union=1536  (of 1536)
+          shape  single  U_diff  U_same    ctrl    Ud-C    Us-C   Ud-Us
+         circle   0.282   0.378   0.333   0.380  -0.002  -0.047  +0.045
+     swiss_roll   0.273   0.367   0.292   0.381  -0.015  -0.090  +0.075
+
+cell exp8 (d_sae 1024, atoms/dim 1.60) k8:  alive seed=1.00 ctrl=1.00  -> eff atoms ctrl=3072 union=3072  (of 3072)
+          shape  single  U_diff  U_same    ctrl    Ud-C    Us-C   Ud-Us
+         circle   0.634   0.772   0.739   0.499  +0.272  +0.240  +0.033
+     swiss_roll   0.522   0.636   0.612   0.417  +0.219  +0.195  +0.023
+
+cell exp8 (d_sae 1024, atoms/dim 1.60) k16:  alive seed=1.00 ctrl=1.00  -> eff atoms ctrl=3072 union=3072  (of 3072)
+          shape  single  U_diff  U_same    ctrl    Ud-C    Us-C   Ud-Us
+         circle   0.378   0.538   0.440   0.294  +0.244  +0.146  +0.098
+     swiss_roll   0.364   0.475   0.413   0.194  +0.282  +0.219  +0.062
+
+total 358s
