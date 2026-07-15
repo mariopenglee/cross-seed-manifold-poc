@@ -155,11 +155,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--d", type=int, default=128)
-    p.add_argument("--c", type=int, default=512)
+    p.add_argument("--c", type=int, default=48)   # paper-matched crowding (was 512)
     p.add_argument("--n-samples", type=int, default=30000)
     p.add_argument("--noise", type=float, default=0.05)
     p.add_argument("--n-seeds", type=int, default=5)
-    p.add_argument("--expansion", type=int, default=8, help="d_sae = expansion * d")
+    p.add_argument("--expansion", type=int, default=4, help="d_sae = expansion * d")
     p.add_argument("--k", type=int, default=8, help="SAE TopK sparsity")
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--batch", type=int, default=4096)

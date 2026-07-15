@@ -41,7 +41,7 @@ def eval_cell(saes, ctrl, decs, dec_union, dec_ctrl, manifolds, shapes, B, n_pro
 
 
 def run():
-    d, c, n_seeds = 128, 256, 3
+    d, c, n_seeds = 128, 48, 3   # c: paper-matched crowding (was 256 — over-crowded)
     steps, n_samples, noise, batch = 1000, 20000, 0.05, 4096
     B, n_probe = 8, 512
     shapes = ["circle", "swiss_roll"]

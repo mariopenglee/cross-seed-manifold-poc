@@ -26,7 +26,8 @@ To run the experiments as scripts:
 
 ```
 uv sync
-uv run run_poc.py --quick     # ~30s smoke test; writes figures to results/figures/
+uv run ksweep.py              # the headline: cross-seed benefit vs. sparsity k
+uv run run_poc.py --quick     # ~30s smoke test; single-config reconstruction demo
 uv run sweep.py               # capacity x sparsity sweep
 uv run mechanism.py           # seed diversity vs. just having N independent SAEs
 uv run matched_control.py     # control matching the pool's active-feature count
@@ -36,21 +37,40 @@ Everything runs on CPU. Saved outputs from earlier runs are in `results/`.
 
 ## Results so far
 
-Preliminary, and on the toy data only.
+Preliminary, toy data only, one reconstruction metric.
 
-In a moderate-capacity regime (roughly one to a few SAE features per manifold
-dimension), the pooled union reconstructs the target manifold with fewer features
-than a single seed, and does somewhat better than a single SAE given the same
-total width and the same training compute. On circle and swiss-roll manifolds the
-gap is around +0.2 to +0.3 in the few-feature reconstruction score.
+Following the paper, a manifold's fate is governed by the TopK sparsity `k`: near
+`k ≈ manifold dimension` a single SAE captures it compactly, and as `k` grows the
+capture dilutes across many redundant atoms. Pooling several seeds helps *unevenly*
+along this axis (`ksweep.py`):
 
-The effect depends on the regime. It shrinks when the SAE is large relative to the
-manifold, and it reverses when features are scarce. Most of the gain comes from
-having several independent SAEs to pool from; a smaller and fairly consistent part
-comes from the seed difference itself. This is one metric on synthetic data and
-has not been tested on real models.
+- Where a single SAE captures compactly (small `k`), pooling adds little — the
+  manifold is already reconstructed from a handful of atoms.
+- As `k` pushes the SAE into dilution, the pooled union pulls ahead of a **single
+  seed**: the gap grows from near zero (compact capture) to roughly **+0.1** in the
+  few-feature reconstruction score (deep dilution). We measure against one seed — a
+  consistent baseline — rather than against the width-matched control, which is itself
+  unreliable (see below), so `ksweep.py` plots single / union / control as raw scores.
 
-![reconstruction score vs. number of features, circle manifold](results/figures/circle_crossseed.png)
+So the benefit tracks dilution: pooling seeds helps most where a single SAE stops
+capturing the manifold cleanly. (An earlier version of this repo swept SAE *capacity*
+at a fixed high `k` with a much more crowded dictionary, which pinned everything in
+dilution and hid this structure; the sparsity axis and a paper-matched dictionary are
+what make it legible.)
+
+Two notes on mechanism. First, the width-matched control is not a free win for "just
+make one SAE wider": at high `k` a single wide SAE reconstructs the manifold *worse*
+than one narrow seed — extra capacity at high sparsity fragments the manifold instead
+of spanning it. That capacity-pathology is the paper's dilution thesis visible in one
+number, and it's why union-minus-control overstates the benefit (it mixes "union wins"
+with "control fails"). Second, decomposing the union's gain, roughly half comes from
+simply having several independent SAEs to pool and half from the seed difference
+itself — averaging aligned seeds does not reproduce it, so the seeds cover complementary
+regions rather than denoising a shared solution.
+
+None of this has been tested on a real model, where the manifold geometry is unknown.
+
+![single / union / width-matched control capture vs. sparsity k](results/figures/ksweep_crossseed.png)
 
 ## Implementation
 
@@ -64,7 +84,8 @@ has not been tested on real models.
   from data-order noise.
 - `metrics.py` — the reconstruction score: a greedy "restricted R^2" measuring how
   few features are needed to reconstruct a manifold's activations.
-- `run_poc.py`, `sweep.py`, `mechanism.py`, `matched_control.py` — the experiments.
+- `ksweep.py`, `run_poc.py`, `sweep.py`, `mechanism.py`, `matched_control.py` — the
+  experiments. `ksweep.py` is the main one (cross-seed benefit across the sparsity axis).
 
 `sae.py` and `metrics.py` adapt code from goodfire-ai/sae-manifold (MIT).
 

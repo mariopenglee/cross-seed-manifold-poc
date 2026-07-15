@@ -5,6 +5,7 @@
 #     "numpy>=1.24",
 #     "torch>=2.2",
 #     "scikit-learn>=1.3",
+#     "scipy>=1.10",
 #     "matplotlib>=3.7",
 # ]
 # ///
@@ -58,7 +59,8 @@ def _(mo):
     control, and (3) *see* how few atoms each needs to reconstruct the manifold —
     against the PCA (optimal-linear) baseline.
 
-    Full method + results: `docs/TECHNICAL.md`.
+    Section 6 then asks *why* pooling helps — complementary **tiling** or plain
+    **variance reduction**. See `README.md` for method + how to run.
     """)
     return
 
@@ -106,7 +108,7 @@ def _(PCA, np, plt, shape, synthetic):
     _P = PCA(n_components=3).fit_transform(_ambient - _ambient.mean(0))
     _ax2 = _fig.add_subplot(1, 2, 2, projection="3d")
     _ax2.scatter(_P[:, 0], _P[:, 1], _P[:, 2], s=4, alpha=0.5, color="tab:purple")
-    _ax2.set_title("embedded in 128-d → PCA-3D")
+    _ax2.set_title("embedded in 128-d -> PCA-3D")
     _fig.tight_layout()
     _fig
     return
@@ -121,18 +123,41 @@ def _(mo):
     *single* SAE with `N×` the width (same total atoms **and** compute). The first
     click trains `N+1` small SAEs on CPU (**~20–60s** — you'll see a spinner). Training
     is cached, so the sliders below won't retrain unless you change a training knob.
+
+    **Defaults reproduce Bhalla et al.'s synthetic benchmark** (c=48 manifolds in
+    d=128, SAE width 512 = ×4, k=4, 4 co-active per sample). The legend below says which
+    lever does what — and which one quietly misled us.
     """)
     return
 
 
 @app.cell
 def _(mo):
-    c = mo.ui.slider(32, 384, value=128, step=32, label="ground-truth manifolds (c)")
-    expansion = mo.ui.slider(2, 12, value=8, step=1, label="SAE expansion (×128)")
-    ksae = mo.ui.dropdown(["4", "8", "16", "32"], value="16", label="SAE TopK k")
-    nseeds = mo.ui.slider(2, 5, value=3, step=1, label="# seeds (union size)")
+    mo.md(r"""
+    | lever | what it controls | guidance |
+    |---|---|---|
+    | **k (TopK)** | **the regime axis** | The paper's whole story lives here: low k **shatters**, k≈manifold dim **captures** (compact atom group spans it — their k=4 sweet-spot), high k **dilutes** (many redundant atoms per point). Sweep k to move between regimes. |
+    | **c (# manifolds)** | crowding *(handle with care)* | Each manifold spans 2–3 of the 128 dims; pack in too many (c ≫ ~50) and the spans collide, capping capture and faking *"dilution everywhere"* — the knob that misled our first pass. Crank it to *watch* capture strangle, but know that's crowding, not a k effect. |
+    | **width (×128)** | atoms to go around | Secondary. Paper uses ×4 (width 512). |
+    | **# seeds** | union size | **Our lever, not the paper's** — the cross-seed question it doesn't ask. Union pools this many independent-seed SAEs vs. one `N×`-wide control (matched atoms + compute). |
+
+    Nothing is locked — every knob is live. These are just the ones the paper pins vs.
+    the ones that mislead. At the k=4 default a single SAE already *captures*, so the
+    union barely helps; push **k toward dilution (≥24)** to see where pooling seeds pays off.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    c = mo.ui.slider(16, 256, value=48, step=16, label="manifolds c  (keep ~48)")
+    expansion = mo.ui.slider(2, 12, value=4, step=1, label="SAE width ×128  (paper: 4)")
+    ksae = mo.ui.dropdown(
+        ["1", "2", "4", "8", "16", "24", "32"], value="4", label="TopK k  (regime axis)"
+    )
+    nseeds = mo.ui.slider(2, 5, value=3, step=1, label="# seeds (union) — our lever")
     steps = mo.ui.slider(200, 1500, value=800, step=100, label="training steps")
-    run = mo.ui.run_button(label="▶ Train SAEs")
+    run = mo.ui.run_button(label="Train SAEs")
     mo.vstack([mo.hstack([c, expansion, ksae]), mo.hstack([nseeds, steps]), run])
     return c, expansion, ksae, nseeds, run, steps
 
@@ -185,12 +210,16 @@ def _(c, expansion, ksae, mo, nseeds, run, shape, steps, train_or_cached):
         art = train_or_cached(key, run.value)
     mo.stop(
         art is None,
-        mo.md("### 👆 Set parameters and click **▶ Train SAEs**"),
+        mo.md("### Set parameters and click **Train SAEs**"),
     )
+    _e = art["target"].e
+    _regime = ("sparse / shattering-prone" if art["k"] < _e else
+               "capture regime (paper sweet-spot, k≈dim)" if art["k"] <= 8 * _e else
+               "dilution regime")
     mo.md(
         f"Trained **{nseeds.value} seeds** (width {art['d_sae']}) + a width-"
         f"{art['d_sae'] * nseeds.value} control on shape **{shape.value}** "
-        f"(k={art['k']})."
+        f"(span dim e={_e}, k={art['k']}) -> **{_regime}**."
     )
     return (art,)
 
@@ -389,6 +418,316 @@ def _(PCA, art, budget, metrics, np, plt, sae_mod, seed_toggles):
     _ax2.set_xticklabels([]); _ax2.set_yticklabels([]); _ax2.set_zticklabels([])
 
     _fig.suptitle(f"{_target.shape}: per-seed vs. pooled reconstruction (true = gray)")
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    ## 6 · Tiling or variance reduction? — why pooling helps
+
+    Pooling seeds could help for two very different reasons:
+
+    - **Variance reduction** — every seed learns *the same* atoms, just noisy copies of
+      each other. The union simply gets to pick the cleaner version. No new territory is
+      covered; you'd get the same benefit by *averaging* aligned seeds.
+    - **Tiling** — seeds learn *complementary* atoms, each covering a different slice of
+      the manifold. The union stitches the slices together. Averaging can't reproduce
+      this — you can't average two atoms into a third one that sits somewhere else.
+
+    Four measures decide which it is (computed on the trained seeds from Section 2, at
+    the current **B**). The **aligned-average** test is the cleanest: align every seed's
+    features to seed 0 (Hungarian match on decoder cosine), average the matched atoms,
+    and see how much of the union's gain that recovers. **~100% -> variance reduction;
+    little -> tiling.**
+    """)
+    return
+
+
+@app.cell
+def _(art, budget, metrics, mo, np, sae_mod):
+    from scipy.optimize import linear_sum_assignment
+
+    def _align_and_average(decs, codes, ref=0):
+        # Align each seed's atoms to a reference (max decoder cosine), then average
+        # matched atoms + their codes. Denoises copies; cannot invent a new-region atom.
+        n, (m, _) = len(decs), decs[0].shape
+        unit = lambda D: D / np.linalg.norm(D, axis=1, keepdims=True).clip(1e-8)
+        dref = unit(decs[ref])
+        dec_acc = decs[ref].astype(np.float64).copy()
+        code_acc = codes[ref].astype(np.float64).copy()
+        for j in range(n):
+            if j == ref:
+                continue
+            row, col = linear_sum_assignment(-(dref @ unit(decs[j]).T))
+            perm = np.empty(m, int)
+            perm[row] = col
+            dec_acc += decs[j][perm]
+            code_acc += codes[j][:, perm]
+        return (dec_acc / n).astype(np.float32), (code_acc / n).astype(np.float32)
+
+    def _engaged(codes, top):
+        sd = codes.std(0)
+        idx = np.argsort(-sd)[:top]
+        return idx[sd[idx] > 1e-3]
+
+    _probe, _decs, _seeds = art["probe"], art["decs"], art["seeds"]
+    _n, _m, _B = len(_seeds), _decs[0].shape[0], budget.value
+    _codes = [sae_mod.encode_sae(_s, _probe) for _s in _seeds]
+    _du = np.vstack(_decs)
+
+    # single seeds vs union: greedy top-B reconstructions + per-point residuals
+    _singles = [metrics.greedy_codes_reconstruct(_probe, _decs[_i], _codes[_i], _B)
+                for _i in range(_n)]
+    _best = max(range(_n), key=lambda _i: _singles[_i][1])
+    _s_recon, _s_r2, _ = _singles[_best]
+    _u_recon, _u_r2, _u_sel = metrics.greedy_codes_reconstruct(
+        _probe, _du, np.hstack(_codes), _B)
+
+    _s_res = ((_probe - _s_recon) ** 2).sum(1)
+    _u_res = ((_probe - _u_recon) ** 2).sum(1)
+    _imp = _s_res - _u_res
+    _gap = _u_r2 - _s_r2  # how much the union beats the best single seed
+
+    # (1) gap-fill: share of improvement landing on the worst-25% single-seed points
+    _order = np.argsort(-_s_res)
+    _qn = max(len(_order) // 4, 1)
+    _frac_worst = float(_imp[_order[:_qn]].sum() / max(_imp.sum(), 1e-9))
+    _corr = float(np.corrcoef(_s_res, _imp)[0, 1])
+
+    # (2) composition: how many distinct seeds feed the union's greedy top-B
+    _sel_seed = np.array([_idx // _m for _idx in _u_sel])
+    _counts = np.bincount(_sel_seed, minlength=_n)
+    _n_distinct = int((_counts > 0).sum())
+
+    # (3) atom overlap: cross-seed nearest-neighbour |cos| vs within-seed baseline
+    _dirs = []
+    for _i in range(_n):
+        _A = _decs[_i][_engaged(_codes[_i], _B)]
+        _dirs.append(_A / np.linalg.norm(_A, axis=1, keepdims=True).clip(1e-8))
+    _cross, _within = [], []
+    for _i in range(_n):
+        for _j in range(_n):
+            _C = np.abs(_dirs[_i] @ _dirs[_j].T)
+            if _i == _j:
+                np.fill_diagonal(_C, 0.0)
+                _within.append(_C.max(1))
+            else:
+                _cross.append(_C.max(1))
+    _cross_ov = float(np.concatenate(_cross).mean()) if _cross else float("nan")
+    _within_ov = float(np.concatenate(_within).mean())
+
+    # (4) aligned-average: averaging denoises but cannot add coverage
+    _dec_avg, _code_avg = _align_and_average(_decs, _codes)
+    _, _a_r2, _ = metrics.greedy_codes_reconstruct(_probe, _dec_avg, _code_avg, _B)
+    _recovered = float((_a_r2 - _s_r2) / _gap) if _gap > 1e-6 else float("nan")
+
+    if _gap <= 1e-3:
+        _out = mo.md(
+            f"""
+            **Union ≈ best single seed here** (union R²={_u_r2:.2f}, best single
+            R²={_s_r2:.2f}, gap {_gap:+.2f}). There's essentially no pooling benefit to
+            explain at this config — the SAE is roomy enough that one seed already
+            captures the manifold. Lower the capacity (raise **c**, or drop expansion /
+            **k**) so the union beats the single seed, then this section becomes
+            informative.
+            """
+        )
+    else:
+        # simple verdict: tiling signatures vs variance-reduction signatures
+        _tiling_votes = (
+            (_frac_worst > 0.45)          # improvement concentrated on worst points
+            + (_n_distinct >= 2)          # union draws atoms from ≥2 seeds
+            + (_cross_ov < _within_ov + 0.02)  # cross-seed no more aligned than within
+            + (_recovered < 0.6)          # averaging recovers little of the gain
+        )
+        _verdict = ("**TILING** — the extra atoms cover distinct territory"
+                    if _tiling_votes >= 3 else
+                    "**VARIANCE REDUCTION** — seeds mostly relearn the same atoms"
+                    if _tiling_votes <= 1 else "**MIXED**")
+        _out = mo.md(
+            f"""
+            Best single seed R²={_s_r2:.2f} · union R²={_u_r2:.2f} · **U−S={_gap:+.2f}**
+            &nbsp;->&nbsp; verdict: {_verdict} &nbsp;({_tiling_votes}/4 tiling signatures)
+
+            | measure | value | tiling looks like | variance-reduction looks like |
+            |---|---|---|---|
+            | **1. gap-fill** — share of improvement on the worst-25% single-seed points | **{_frac_worst*100:.0f}%** (null 25%); corr(res, improvement) **{_corr:+.2f}** | ≫ 25%, corr -> +1 | ≈ 25%, corr ≈ 0 |
+            | **2. composition** — distinct seeds feeding the union's top-{_B} | **{_n_distinct}/{_n}** &nbsp; counts {_counts.tolist()} | several seeds | one seed dominates |
+            | **3. atom overlap** — nearest-neighbour \\|cos\\| | cross **{_cross_ov:.2f}** vs within **{_within_ov:.2f}** | cross ≲ within | cross ≫ within (copies) |
+            | **4. aligned-average** — gain recovered by averaging | R²={_a_r2:.2f} -> **{_recovered*100:.0f}%** | little (can't add coverage) | ~100% (denoising) |
+
+            The map below colors each manifold point by how much the union improves it — a
+            **tiling** union concentrates its help on the regions the best single seed
+            reconstructs *worst* (the bright points); pure variance reduction would spread
+            evenly.
+            """
+        )
+    _out
+    return
+
+
+@app.cell
+def _(PCA, art, budget, metrics, np, plt, sae_mod):
+    _probe, _decs, _seeds = art["probe"], art["decs"], art["seeds"]
+    _target, _B = art["target"], budget.value
+    _n = len(_seeds)
+    _codes = [sae_mod.encode_sae(_s, _probe) for _s in _seeds]
+    _du = np.vstack(_decs)
+
+    _singles = [metrics.greedy_codes_reconstruct(_probe, _decs[_i], _codes[_i], _B)
+                for _i in range(_n)]
+    _best = max(range(_n), key=lambda _i: _singles[_i][1])
+    _s_recon = _singles[_best][0]
+    _u_recon, _u_r2, _ = metrics.greedy_codes_reconstruct(
+        _probe, _du, np.hstack(_codes), _B)
+    _imp = ((_probe - _s_recon) ** 2).sum(1) - ((_probe - _u_recon) ** 2).sum(1)
+
+    _mean = _probe.mean(0)
+    _view = PCA(3).fit(_probe - _mean)
+    _T = _view.transform(_probe - _mean)
+    _L = float(np.abs(_T).max())
+    _clip = np.clip(_imp, 0, None)
+    _sz = 8 + 60 * (_clip / (_clip.max() + 1e-9))
+
+    _fig = plt.figure(figsize=(7, 6))
+    _ax = _fig.add_subplot(111, projection="3d")
+    _sc = _ax.scatter(_T[:, 0], _T[:, 1], _T[:, 2], c=_clip, s=_sz,
+                      cmap="magma", alpha=0.85)
+    _ax.set_xlim(-_L, _L); _ax.set_ylim(-_L, _L); _ax.set_zlim(-_L, _L)
+    _ax.set_box_aspect((1, 1, 1))
+    _ax.set_xticklabels([]); _ax.set_yticklabels([]); _ax.set_zticklabels([])
+    _fig.colorbar(_sc, ax=_ax, shrink=0.6, label="union improvement per point")
+    _ax.set_title(f"{_target.shape}: where the union helps (bright = "
+                  f"best single seed's worst regions)", fontsize=9)
+    _fig.tight_layout()
+    _fig
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## 7 · The headline — where does pooling help across the sparsity regime?
+
+    Sections 2–6 explored **one** value of `k`. This sweeps `k` (the paper's regime
+    axis) at the current **c / width / # seeds** and plots the **raw** capture scores
+    (over all eight shapes), so nothing is hidden inside a difference:
+
+    - **single** — one seed's SAE.
+    - **union** — the pooled `N` seeds.
+    - **control** — one SAE of the same total width **and** compute as the union.
+    - **ρ** — single-seed capture compactness (1 = compact, → 0 = diluted).
+
+    Read it two honest ways: **union − single** is the pooling benefit against a
+    *consistent* baseline; **union vs control** is the resource-matched question. Watch
+    the **control dip below single at high `k`** — that's the paper's dilution thesis in
+    one line: extra atoms at high sparsity go into *fragmenting* the manifold, not
+    spanning it, so a wider SAE captures *worse*. Pooling's edge over a single seed grows
+    as `k` drives it into dilution (ρ falls). ~20 small SAEs → **~2–4 min** first run
+    (cached afterwards).
+    """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    run_ksweep = mo.ui.run_button(label="Run the sparsity sweep")
+    run_ksweep
+    return (run_ksweep,)
+
+
+@app.cell
+def _(metrics, np, sae_mod, synthetic, train_mod):
+    _KSWEEP_CACHE = {}
+    _KLIST = (4, 8, 12, 16, 24, 32)
+
+    def _rho(curve, e):
+        cv = np.asarray(curve, float)
+        if len(cv) == 0 or cv[-1] <= 1e-9:
+            return np.nan
+        return float(cv[min(e, len(cv)) - 1] / cv[-1])
+
+    def _sweep(c, expansion, nseeds, steps):
+        d = 128
+        manifolds = synthetic.build_dictionary(c=c, d=d, seed=0)
+        X = synthetic.generate_dataset(manifolds, 20000, k_active=4,
+                                       noise_sigma=0.05, seed=1)
+        d_sae = expansion * d
+        shapes = sorted({m.shape for m in manifolds})
+        rows = []
+        for k in _KLIST:
+            seeds = [train_mod.train_topk_sae(X, d_sae, k, seed=s, steps=steps,
+                                              batch=4096) for s in range(nseeds)]
+            ctrl = train_mod.train_topk_sae(X, d_sae * nseeds, k, seed=0,
+                                            steps=steps, batch=4096)
+            decs = [sae_mod.get_decoder(s) for s in seeds]
+            du, dc = np.vstack(decs), sae_mod.get_decoder(ctrl)
+            singles, unions, controls, rhos = [], [], [], []
+            for shape in shapes:
+                tgt = synthetic.first_of_shape(manifolds, shape)
+                probe, _ = synthetic.probe_in_context(tgt, manifolds, k_active=4,
+                                                      n_probe=512, noise_sigma=0.0)
+                cs = [sae_mod.encode_sae(s, probe) for s in seeds]
+                single = np.mean([metrics.auc(
+                    metrics.greedy_codes(probe, decs[i], cs[i], 8), 8)
+                    for i in range(nseeds)])
+                union = metrics.auc(metrics.greedy_codes(probe, du, np.hstack(cs), 8), 8)
+                control = metrics.auc(
+                    metrics.greedy_codes(probe, dc, sae_mod.encode_sae(ctrl, probe), 8), 8)
+                singles.append(single); unions.append(union); controls.append(control)
+                rhos.append(_rho(metrics.greedy_codes(probe, decs[0], cs[0], 48), tgt.e))
+            rows.append((k, float(np.mean(singles)), float(np.mean(unions)),
+                         float(np.mean(controls)), float(np.nanmean(rhos))))
+        return rows
+
+    def ksweep_or_cached(key, force):
+        if key in _KSWEEP_CACHE:
+            return _KSWEEP_CACHE[key]
+        if not force:
+            return None
+        _KSWEEP_CACHE[key] = _sweep(*key)
+        return _KSWEEP_CACHE[key]
+
+    return (ksweep_or_cached,)
+
+
+@app.cell
+def _(c, expansion, ksweep_or_cached, mo, nseeds, plt, run_ksweep, steps):
+    _key = (c.value, expansion.value, nseeds.value, steps.value)
+    with mo.status.spinner(title="Sweeping k — training ~20 SAEs on CPU…"):
+        _rows = ksweep_or_cached(_key, run_ksweep.value)
+    mo.stop(
+        _rows is None,
+        mo.md("### Click **Run the sparsity sweep** (uses the c / width / # seeds above)"),
+    )
+
+    _ks = [r[0] for r in _rows]
+    _single = [r[1] for r in _rows]
+    _union = [r[2] for r in _rows]
+    _control = [r[3] for r in _rows]
+    _rho = [r[4] for r in _rows]
+
+    _fig, _ax = plt.subplots(figsize=(8.5, 5))
+    _l1, = _ax.plot(_ks, _union, "o-", color="tab:red", lw=2, label="union (pooled seeds)")
+    _l2, = _ax.plot(_ks, _single, "^-", color="tab:green", label="single seed")
+    _l3, = _ax.plot(_ks, _control, "v--", color="tab:orange", label="width-matched control")
+    _ax.set_xlabel("k  (TopK sparsity — the regime axis)")
+    _ax.set_ylabel("restricted-R² capture (AUC over 8 atoms)")
+    _ax2 = _ax.twinx()
+    _l4, = _ax2.plot(_ks, _rho, "s:", color="tab:blue", alpha=0.5, label="rho (capture)")
+    _ax2.set_ylabel("rho  (1 = compact capture, -> 0 = dilution)", color="tab:blue")
+    _ax2.tick_params(axis="y", labelcolor="tab:blue")
+    _ax2.set_ylim(0, 1.05)
+    _ax.set_title(f"c={c.value}, width {expansion.value*128}, {nseeds.value} seeds: "
+                  f"union beats single; control dips below single in dilution")
+    _ax.legend([_l1, _l2, _l3, _l4],
+               ["union (pooled seeds)", "single seed", "width-matched control",
+                "rho (capture)"], fontsize=8, loc="center left")
     _fig.tight_layout()
     _fig
     return
