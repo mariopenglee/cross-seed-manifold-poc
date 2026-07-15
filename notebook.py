@@ -54,10 +54,10 @@ def _(mo):
     # Cross-seed SAE manifold explorer
 
     Do several SAEs that differ **only in random seed**, pooled together, capture a
-    concept **manifold** more fully than one SAE? This notebook lets you (1) look at
-    the synthetic manifold geometries, (2) train a seed sweep + a width-matched
-    control, and (3) *see* how few atoms each needs to reconstruct the manifold —
-    against the PCA (optimal-linear) baseline.
+    concept **manifold** more fully than one SAE? This notebook lets you (1) build a
+    synthetic activation dataset and train a seed sweep + a width-matched control,
+    (2) pick a target concept and see its geometry, and (3) *see* how few atoms each
+    needs to reconstruct it — against the PCA (optimal-linear) baseline.
 
     Section 6 then asks *why* pooling helps — complementary **tiling** or plain
     **variance reduction**. See `README.md` for method + how to run.
@@ -68,7 +68,131 @@ def _(mo):
 @app.cell
 def _(mo):
     mo.md("""
-    ## 1 · Explore the manifold geometries
+    ## 1 · Set up the activations and train
+
+    Set the **dataset** knobs (what geometry the SAEs see) and the **SAE** knobs, then
+    click **Train**. The union pools `N` seeds; the control is a *single* SAE with `N×`
+    the width (same total atoms **and** compute). The first click trains `N+1` small SAEs
+    on CPU (**~20–60s**). The SAEs train on the full mixture of *all* manifolds, so they
+    are **shared across shapes** — only the dataset/SAE knobs below trigger a retrain;
+    choosing which shape/instance to score (Section 2, *after* training) is instant.
+
+    **Defaults reproduce Bhalla et al.'s synthetic benchmark** (c=48 manifolds in
+    d=128, SAE width 512 = ×4, k=4, 4 co-active per sample). The legend below says which
+    lever does what — and which one quietly misled us.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    | lever | what it controls | guidance |
+    |---|---|---|
+    | **k (TopK)** | **the regime axis** | The paper's whole story lives here: low k **shatters**, k≈manifold dim **captures** (compact atom group spans it — their k=4 sweet-spot), high k **dilutes** (many redundant atoms per point). Sweep k to move between regimes. |
+    | **c (# manifolds)** | crowding *(handle with care)* | Each manifold spans 2–3 of the 128 dims; pack in too many (c ≫ ~50) and the spans collide, capping capture and faking *"dilution everywhere"* — the knob that misled our first pass. Crank it to *watch* capture strangle, but know that's crowding, not a k effect. |
+    | **width (×128)** | atoms to go around | Secondary. Paper uses ×4 (width 512). |
+    | **# seeds** | union size | **Our lever, not the paper's** — the cross-seed question it doesn't ask. Union pools this many independent-seed SAEs vs. one `N×`-wide control (matched atoms + compute). |
+
+    Nothing is locked — every knob is live. These are just the ones the paper pins vs.
+    the ones that mislead. At the k=4 default a single SAE already *captures*, so the
+    union barely helps; push **k toward dilution (≥24)** to see where pooling seeds pays off.
+    """)
+    return
+
+
+@app.cell
+def _(mo):
+    # --- Dataset knobs: what activations the SAE is trained on ---
+    d_ambient = mo.ui.slider(64, 256, value=128, step=32, label="ambient dim d")
+    c = mo.ui.slider(16, 256, value=48, step=16, label="# manifolds c")
+    k_active = mo.ui.slider(1, 8, value=4, step=1, label="co-active / sample")
+    noise = mo.ui.slider(0.0, 0.20, value=0.05, step=0.01, label="noise σ (train data)")
+    # --- SAE knobs: the model we train to recover them ---
+    expansion = mo.ui.slider(2, 12, value=4, step=1, label="SAE width (×d)")
+    ksae = mo.ui.dropdown(
+        ["1", "2", "4", "8", "16", "24", "32"], value="4", label="TopK k (regime axis)"
+    )
+    nseeds = mo.ui.slider(2, 5, value=3, step=1, label="# seeds (union)")
+    steps = mo.ui.slider(200, 1500, value=800, step=100, label="training steps")
+    run = mo.ui.run_button(label="Train SAEs")
+    mo.vstack([
+        mo.md("**Dataset — the activations** &nbsp; *(these define the manifold "
+              "geometry the SAE sees; changing any retrains)*"),
+        mo.hstack([d_ambient, c, k_active, noise]),
+        mo.md("**SAE — the model** &nbsp; *(how we try to recover the manifolds)*"),
+        mo.hstack([expansion, ksae, nseeds, steps]),
+        run,
+    ])
+    return c, d_ambient, expansion, k_active, ksae, noise, nseeds, run, steps
+
+
+@app.cell
+def _(c, d_ambient, k_active, mo, synthetic):
+    _types = synthetic.SHAPE_TYPES
+    _spans = [synthetic.SHAPE_EMBED_DIM[_types[i % len(_types)]] for i in range(c.value)]
+    _total = sum(_spans)
+    _rate = _total / d_ambient.value
+    _load = k_active.value * _total / c.value
+    _tag = ("**over-complete** — true superposition"
+            if _rate > 1 else "under-full — room to spare")
+    mo.md(
+        f"**Superposition readout.** {c.value} manifolds span **{_total}** dims total "
+        f"inside a **{d_ambient.value}-dim** space -> **span / d = {_rate:.2f}** ({_tag}). "
+        f"Each sample superposes **{k_active.value}** of them "
+        f"(~{_load:.0f} signal dims of {d_ambient.value}). "
+        f"The paper's regime is span/d > 1; the c=48 / d=128 default sits at 0.94."
+    )
+    return
+
+
+@app.cell
+def _(np, sae_mod, synthetic, train_mod):
+    _CACHE = {}
+
+    def _train_all(c, d, expansion, k, nseeds, steps, k_active, noise):
+        # SAEs train on the full mixture (all manifolds), independent of which target
+        # shape/instance you later probe — the cache key omits shape + instance.
+        manifolds = synthetic.build_dictionary(c=c, d=d, seed=0)
+        X = synthetic.generate_dataset(
+            manifolds, 20000, k_active=k_active, noise_sigma=noise, seed=1
+        )
+        d_sae = expansion * d
+        seeds = [
+            train_mod.train_topk_sae(X, d_sae, k, seed=s, steps=steps, batch=4096)
+            for s in range(nseeds)
+        ]
+        ctrl = train_mod.train_topk_sae(
+            X, d_sae * nseeds, k, seed=0, steps=steps, batch=4096
+        )
+        decs = [sae_mod.get_decoder(s) for s in seeds]
+        return dict(
+            seeds=seeds, ctrl=ctrl, decs=decs, dec_union=np.vstack(decs),
+            dec_ctrl=sae_mod.get_decoder(ctrl), manifolds=manifolds,
+            k=k, d_sae=d_sae, k_active=k_active,
+        )
+
+    def train_or_cached(key, force):
+        if key in _CACHE:
+            return _CACHE[key]
+        if not force:
+            return None
+        _CACHE[key] = _train_all(*key)
+        return _CACHE[key]
+
+    return (train_or_cached,)
+
+
+@app.cell
+def _(mo):
+    mo.md("""
+    ## 2 · Choose what to score (after training)
+
+    The SAEs above see **all** manifolds, so these are pure *probing* choices — changing
+    them re-measures instantly, no retrain. Pick a **shape**, and either a specific
+    **instance** or the mean over all instances of that shape (robust to a single unlucky
+    embedding — e.g. the mobius fluke). The preview shows the target's geometry;
+    Sections 3+ score it.
     """)
     return
 
@@ -76,10 +200,24 @@ def _(mo):
 @app.cell
 def _(mo, synthetic):
     shape = mo.ui.dropdown(
-        options=synthetic.SHAPE_TYPES, value="helix", label="Manifold shape"
+        options=synthetic.SHAPE_TYPES, value="helix", label="target shape"
     )
     shape
     return (shape,)
+
+
+@app.cell
+def _(c, mo, shape, synthetic):
+    _types = synthetic.SHAPE_TYPES
+    _count = sum(1 for i in range(c.value) if _types[i % len(_types)] == shape.value)
+    instance_sel = mo.ui.dropdown(
+        ["average over all"] + [str(i) for i in range(max(_count, 1))],
+        value="average over all",
+        label=f"target instance  ({_count} {shape.value}(s) in the dictionary)",
+    )
+    mo.vstack([mo.md("**Which instance** — a specific one, or the mean over all "
+                     "instances of this shape:"), instance_sel])
+    return (instance_sel,)
 
 
 @app.cell
@@ -115,117 +253,39 @@ def _(PCA, np, plt, shape, synthetic):
 
 
 @app.cell
-def _(mo):
-    mo.md("""
-    ## 2 · Train the seed sweep + width-matched control
-
-    Pick a regime and click **Train**. The union pools `N` seeds; the control is a
-    *single* SAE with `N×` the width (same total atoms **and** compute). The first
-    click trains `N+1` small SAEs on CPU (**~20–60s** — you'll see a spinner). The SAEs
-    train on the full mixture of *all* manifolds, so they're **shared across target
-    shapes** — switching the shape (Section 1) just re-probes, instantly. Only the
-    training knobs below (c / width / k / # seeds / steps) trigger a retrain.
-
-    **Defaults reproduce Bhalla et al.'s synthetic benchmark** (c=48 manifolds in
-    d=128, SAE width 512 = ×4, k=4, 4 co-active per sample). The legend below says which
-    lever does what — and which one quietly misled us.
-    """)
-    return
-
-
-@app.cell
-def _(mo):
-    mo.md(r"""
-    | lever | what it controls | guidance |
-    |---|---|---|
-    | **k (TopK)** | **the regime axis** | The paper's whole story lives here: low k **shatters**, k≈manifold dim **captures** (compact atom group spans it — their k=4 sweet-spot), high k **dilutes** (many redundant atoms per point). Sweep k to move between regimes. |
-    | **c (# manifolds)** | crowding *(handle with care)* | Each manifold spans 2–3 of the 128 dims; pack in too many (c ≫ ~50) and the spans collide, capping capture and faking *"dilution everywhere"* — the knob that misled our first pass. Crank it to *watch* capture strangle, but know that's crowding, not a k effect. |
-    | **width (×128)** | atoms to go around | Secondary. Paper uses ×4 (width 512). |
-    | **# seeds** | union size | **Our lever, not the paper's** — the cross-seed question it doesn't ask. Union pools this many independent-seed SAEs vs. one `N×`-wide control (matched atoms + compute). |
-
-    Nothing is locked — every knob is live. These are just the ones the paper pins vs.
-    the ones that mislead. At the k=4 default a single SAE already *captures*, so the
-    union barely helps; push **k toward dilution (≥24)** to see where pooling seeds pays off.
-    """)
-    return
-
-
-@app.cell
-def _(mo):
-    c = mo.ui.slider(16, 256, value=48, step=16, label="manifolds c  (keep ~48)")
-    expansion = mo.ui.slider(2, 12, value=4, step=1, label="SAE width ×128  (paper: 4)")
-    ksae = mo.ui.dropdown(
-        ["1", "2", "4", "8", "16", "24", "32"], value="4", label="TopK k  (regime axis)"
-    )
-    nseeds = mo.ui.slider(2, 5, value=3, step=1, label="# seeds (union) — our lever")
-    steps = mo.ui.slider(200, 1500, value=800, step=100, label="training steps")
-    run = mo.ui.run_button(label="Train SAEs")
-    mo.vstack([mo.hstack([c, expansion, ksae]), mo.hstack([nseeds, steps]), run])
-    return c, expansion, ksae, nseeds, run, steps
-
-
-@app.cell
-def _(np, sae_mod, synthetic, train_mod):
-    _CACHE = {}
-
-    def _train_all(c, expansion, k, nseeds, steps):
-        # SAEs train on the full mixture (all manifolds), so this is independent of
-        # which target shape you later probe — the cache key omits the shape.
-        d = 128
-        manifolds = synthetic.build_dictionary(c=c, d=d, seed=0)
-        X = synthetic.generate_dataset(
-            manifolds, 20000, k_active=4, noise_sigma=0.05, seed=1
-        )
-        d_sae = expansion * d
-        seeds = [
-            train_mod.train_topk_sae(X, d_sae, k, seed=s, steps=steps, batch=4096)
-            for s in range(nseeds)
-        ]
-        ctrl = train_mod.train_topk_sae(
-            X, d_sae * nseeds, k, seed=0, steps=steps, batch=4096
-        )
-        decs = [sae_mod.get_decoder(s) for s in seeds]
-        return dict(
-            seeds=seeds, ctrl=ctrl, decs=decs, dec_union=np.vstack(decs),
-            dec_ctrl=sae_mod.get_decoder(ctrl), manifolds=manifolds,
-            k=k, d_sae=d_sae,
-        )
-
-    def train_or_cached(key, force):
-        if key in _CACHE:
-            return _CACHE[key]
-        if not force:
-            return None
-        _CACHE[key] = _train_all(*key)
-        return _CACHE[key]
-
-    return (train_or_cached,)
-
-
-@app.cell
-def _(c, expansion, ksae, mo, nseeds, run, shape, steps, synthetic, train_or_cached):
-    key = (c.value, expansion.value, int(ksae.value), nseeds.value, steps.value)
+def _(c, d_ambient, expansion, instance_sel, k_active, ksae, mo, noise, nseeds,
+      run, shape, steps, synthetic, train_or_cached):
+    key = (c.value, d_ambient.value, expansion.value, int(ksae.value), nseeds.value,
+           steps.value, k_active.value, round(noise.value, 3))
     with mo.status.spinner(title="Training SAEs on CPU… (~20–60s)"):
         _trained = train_or_cached(key, run.value)
     mo.stop(
         _trained is None,
         mo.md("### Set parameters and click **Train SAEs**"),
     )
-    # Changing the target shape does NOT retrain — the SAEs are shared across shapes;
-    # we just re-probe the chosen manifold here (instant).
-    _target = synthetic.first_of_shape(_trained["manifolds"], shape.value)
-    _probe, _ = synthetic.probe_in_context(
-        _target, _trained["manifolds"], k_active=4, n_probe=512, noise_sigma=0.0
-    )
-    art = {**_trained, "target": _target, "probe": _probe}
+    # Switching shape/instance does NOT retrain — the SAEs are shared; we just re-probe.
+    _mans = _trained["manifolds"]
+    _idx = [i for i, m in enumerate(_mans) if m.shape == shape.value] or [0]
+    if instance_sel.value == "average over all":
+        _targets = [_mans[i] for i in _idx]
+    else:
+        _j = int(instance_sel.value)
+        _targets = [_mans[_idx[_j if _j < len(_idx) else 0]]]
+    _ka = _trained["k_active"]
+    _probes = [synthetic.probe_in_context(t, _mans, k_active=_ka, n_probe=512,
+                                          noise_sigma=0.0)[0] for t in _targets]
+    art = {**_trained, "targets": _targets, "probes": _probes,
+           "target": _targets[0], "probe": _probes[0]}
     _e = art["target"].e
     _regime = ("sparse / shattering-prone" if art["k"] < _e else
                "capture regime (paper sweet-spot, k≈dim)" if art["k"] <= 8 * _e else
                "dilution regime")
+    _scope = (f"mean over {len(_targets)} {shape.value} instances"
+              if len(_targets) > 1 else f"{shape.value} instance {instance_sel.value}")
     mo.md(
         f"Trained **{nseeds.value} seeds** (width {art['d_sae']}) + a width-"
-        f"{art['d_sae'] * nseeds.value} control — **shared across shapes**; now probing "
-        f"**{shape.value}** (span dim e={_e}, k={art['k']}) -> **{_regime}**."
+        f"{art['d_sae'] * nseeds.value} control; scoring **{_scope}** "
+        f"(span dim e={_e}, k={art['k']}) -> **{_regime}**."
     )
     return (art,)
 
@@ -240,9 +300,8 @@ def _(mo):
 
 @app.cell
 def _(art, metrics, np, plt, sae_mod):
-    _probe, _target = art["probe"], art["target"]
+    _probes, _target = art["probes"], art["target"]
     _L = 48
-    _cs = [sae_mod.encode_sae(s, _probe) for s in art["seeds"]]
 
     def _pad(cv, L):
         cv = np.asarray(cv, float)
@@ -250,22 +309,30 @@ def _(art, metrics, np, plt, sae_mod):
             return cv[:L]
         return np.concatenate([cv, np.full(L - len(cv), cv[-1] if len(cv) else 0.0)])
 
-    def _stat(dec, codes):
-        return _pad(metrics.greedy_codes(_probe, dec, codes, max_k=_L), _L)
-
-    _ss = np.stack([_stat(art["decs"][i], _cs[i]) for i in range(len(_cs))])
-    _union = _stat(art["dec_union"], np.hstack(_cs))
-    _ctrl = _stat(art["dec_ctrl"], sae_mod.encode_sae(art["ctrl"], _probe))
+    # single / union / control capture curves, averaged over the selected instance(s)
+    _sing, _uni, _ctl = [], [], []
+    for _p in _probes:
+        _cs = [sae_mod.encode_sae(s, _p) for s in art["seeds"]]
+        _sing.append(np.mean(
+            [_pad(metrics.greedy_codes(_p, art["decs"][i], _cs[i], max_k=_L), _L)
+             for i in range(len(_cs))], axis=0))
+        _uni.append(_pad(metrics.greedy_codes(_p, art["dec_union"], np.hstack(_cs), max_k=_L), _L))
+        _ctl.append(_pad(metrics.greedy_codes(
+            _p, art["dec_ctrl"], sae_mod.encode_sae(art["ctrl"], _p), max_k=_L), _L))
+    _single, _union, _ctrl = np.mean(_sing, 0), np.mean(_uni, 0), np.mean(_ctl, 0)
 
     _x = np.arange(1, _L + 1)
+    _n = len(_probes)
     _fig, _ax = plt.subplots(figsize=(7.5, 4.5))
-    _ax.fill_between(_x, _ss.min(0), _ss.max(0), color="tab:blue", alpha=0.15)
-    _ax.plot(_x, _ss.mean(0), "o-", ms=3, color="tab:blue", label="single seed (mean)")
+    if _n > 1:
+        _ax.fill_between(_x, np.min(_uni, 0), np.max(_uni, 0), color="tab:red", alpha=0.12)
+    _ax.plot(_x, _single, "o-", ms=3, color="tab:blue", label="single seed")
     _ax.plot(_x, _union, "s-", ms=3, lw=2, color="tab:red", label="cross-seed union")
     _ax.plot(_x, _ctrl, "^--", ms=3, color="tab:green", label="width-matched control")
     _ax.axvline(_target.e, color="k", lw=0.7, alpha=0.4)
+    _scope = f"mean of {_n} instances (band = union spread)" if _n > 1 else "one instance"
     _ax.set(xlabel="# atoms selected", ylabel="variance explained",
-            title=f"{_target.shape}: manifold reconstruction", xscale="log")
+            title=f"{_target.shape}: manifold reconstruction ({_scope})", xscale="log")
     _ax.set_ylim(-0.02, 1.02)
     _ax.legend(fontsize=8)
     _fig.tight_layout()
@@ -656,11 +723,10 @@ def _(metrics, np, sae_mod, synthetic, train_mod):
             return np.nan
         return float(cv[min(e, len(cv)) - 1] / cv[-1])
 
-    def _sweep(c, expansion, nseeds, steps):
-        d = 128
+    def _sweep(c, d, expansion, nseeds, steps, k_active, noise):
         manifolds = synthetic.build_dictionary(c=c, d=d, seed=0)
-        X = synthetic.generate_dataset(manifolds, 20000, k_active=4,
-                                       noise_sigma=0.05, seed=1)
+        X = synthetic.generate_dataset(manifolds, 20000, k_active=k_active,
+                                       noise_sigma=noise, seed=1)
         d_sae = expansion * d
         shapes = sorted({m.shape for m in manifolds})
         rows = []
@@ -674,7 +740,7 @@ def _(metrics, np, sae_mod, synthetic, train_mod):
             singles, unions, controls, rhos = [], [], [], []
             for shape in shapes:
                 tgt = synthetic.first_of_shape(manifolds, shape)
-                probe, _ = synthetic.probe_in_context(tgt, manifolds, k_active=4,
+                probe, _ = synthetic.probe_in_context(tgt, manifolds, k_active=k_active,
                                                       n_probe=512, noise_sigma=0.0)
                 cs = [sae_mod.encode_sae(s, probe) for s in seeds]
                 single = np.mean([metrics.auc(
@@ -701,8 +767,10 @@ def _(metrics, np, sae_mod, synthetic, train_mod):
 
 
 @app.cell
-def _(c, expansion, ksweep_or_cached, mo, nseeds, plt, run_ksweep, steps):
-    _key = (c.value, expansion.value, nseeds.value, steps.value)
+def _(c, d_ambient, expansion, k_active, ksweep_or_cached, mo, noise, nseeds, plt,
+      run_ksweep, steps):
+    _key = (c.value, d_ambient.value, expansion.value, nseeds.value, steps.value,
+            k_active.value, round(noise.value, 3))
     with mo.status.spinner(title="Sweeping k — training ~20 SAEs on CPU…"):
         _rows = ksweep_or_cached(_key, run_ksweep.value)
     mo.stop(
@@ -770,7 +838,7 @@ def _(metrics, np, sae_mod, synthetic, train_mod):
     _CORR_CACHE = {}
     _CORRS = (0.0, 0.5, 0.7, 0.85, 0.95, 1.0)
 
-    def _gen_correlated(manifolds, n, k_active, groups, corr, seed):
+    def _gen_correlated(manifolds, n, k_active, groups, corr, seed, noise):
         rng = np.random.default_rng(seed)
         c = len(manifolds)
         dim = manifolds[0].V.shape[1]
@@ -788,18 +856,18 @@ def _(metrics, np, sae_mod, synthetic, train_mod):
             rows = np.where((active == i).any(axis=1))[0]
             if len(rows):
                 X[rows] += m.contribution(len(rows), rng)
-        X += rng.normal(0, 0.05, X.shape).astype(np.float32)
+        X += rng.normal(0, noise, X.shape).astype(np.float32)
         return X
 
-    def _corr_sweep(c, expansion, nseeds, steps, k):
-        d = 128
+    def _corr_sweep(c, d, expansion, nseeds, steps, k, k_active, noise):
         manifolds = synthetic.build_dictionary(c=c, d=d, seed=0)
         groups = [list(range(i, min(i + 8, c))) for i in range(0, c, 8)]
         shapes = sorted({m.shape for m in manifolds})
         d_sae = expansion * d
         rows = []
         for corr in _CORRS:
-            X = _gen_correlated(manifolds, 20000, 4, groups, corr, seed=1)
+            X = _gen_correlated(manifolds, 20000, k_active, groups, corr, seed=1,
+                                noise=noise)
             seeds = [train_mod.train_topk_sae(X, d_sae, k, seed=s, steps=steps,
                                               batch=4096) for s in range(nseeds)]
             ctrl = train_mod.train_topk_sae(X, d_sae * nseeds, k, seed=0,
@@ -809,7 +877,7 @@ def _(metrics, np, sae_mod, synthetic, train_mod):
             sng, uni, ctl = [], [], []
             for shape in shapes:
                 tgt = synthetic.first_of_shape(manifolds, shape)
-                probe, _ = synthetic.probe_in_context(tgt, manifolds, k_active=4,
+                probe, _ = synthetic.probe_in_context(tgt, manifolds, k_active=k_active,
                                                       n_probe=512, noise_sigma=0.0)
                 cs = [sae_mod.encode_sae(s, probe) for s in seeds]
                 sng.append(np.mean([metrics.auc(
@@ -834,8 +902,10 @@ def _(metrics, np, sae_mod, synthetic, train_mod):
 
 
 @app.cell
-def _(c, corr_or_cached, expansion, ksae, mo, nseeds, plt, run_corr, steps):
-    _key = (c.value, expansion.value, nseeds.value, steps.value, int(ksae.value))
+def _(c, corr_or_cached, d_ambient, expansion, k_active, ksae, mo, noise, nseeds, plt,
+      run_corr, steps):
+    _key = (c.value, d_ambient.value, expansion.value, nseeds.value, steps.value,
+            int(ksae.value), k_active.value, round(noise.value, 3))
     with mo.status.spinner(title="Correlation sweep — training ~24 SAEs on CPU…"):
         _rows = corr_or_cached(_key, run_corr.value)
     mo.stop(
