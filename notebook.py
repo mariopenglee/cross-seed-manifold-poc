@@ -733,5 +733,134 @@ def _(c, expansion, ksweep_or_cached, mo, nseeds, plt, run_ksweep, steps):
     return
 
 
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## 8 · Structured entanglement — correlated co-activation
+
+    So far concepts co-fire **independently** (4 random manifolds per sample). Real
+    concepts cluster — they co-occur in groups (sunset / orange / evening). This
+    partitions the manifolds into groups of 8 and, with probability **corr**, draws a
+    sample's active set from *within one group*, so those concepts are always seen
+    together. `corr=0` is the independent benchmark; `corr=1` means a concept *only ever*
+    appears with its group-mates.
+
+    Sweeping **corr** (at the current **k**) asks whether structured entanglement breaks
+    per-manifold capture. It does — but only under *near-total* correlation: single-seed
+    capture holds flat until ~0.85, then crashes, and the wide **control drops below a
+    single seed** (the capacity pathology) right at the break. Clearest at a capture `k`
+    (small k). ~24 SAEs → **~3–4 min** first run (cached afterwards).
+    """
+    )
+    return
+
+
+@app.cell
+def _(mo):
+    run_corr = mo.ui.run_button(label="Run the correlation sweep")
+    run_corr
+    return (run_corr,)
+
+
+@app.cell
+def _(metrics, np, sae_mod, synthetic, train_mod):
+    _CORR_CACHE = {}
+    _CORRS = (0.0, 0.5, 0.7, 0.85, 0.95, 1.0)
+
+    def _gen_correlated(manifolds, n, k_active, groups, corr, seed):
+        rng = np.random.default_rng(seed)
+        c = len(manifolds)
+        dim = manifolds[0].V.shape[1]
+        full = [g for g in groups if len(g) >= k_active]
+        active = np.empty((n, k_active), dtype=int)
+        coin = rng.random(n)
+        for s in range(n):
+            if corr > 0 and coin[s] < corr and full:
+                g = full[rng.integers(len(full))]
+                active[s] = rng.choice(g, size=k_active, replace=False)
+            else:
+                active[s] = rng.choice(c, size=k_active, replace=False)
+        X = np.zeros((n, dim), dtype=np.float32)
+        for i, m in enumerate(manifolds):
+            rows = np.where((active == i).any(axis=1))[0]
+            if len(rows):
+                X[rows] += m.contribution(len(rows), rng)
+        X += rng.normal(0, 0.05, X.shape).astype(np.float32)
+        return X
+
+    def _corr_sweep(c, expansion, nseeds, steps, k):
+        d = 128
+        manifolds = synthetic.build_dictionary(c=c, d=d, seed=0)
+        groups = [list(range(i, min(i + 8, c))) for i in range(0, c, 8)]
+        shapes = sorted({m.shape for m in manifolds})
+        d_sae = expansion * d
+        rows = []
+        for corr in _CORRS:
+            X = _gen_correlated(manifolds, 20000, 4, groups, corr, seed=1)
+            seeds = [train_mod.train_topk_sae(X, d_sae, k, seed=s, steps=steps,
+                                              batch=4096) for s in range(nseeds)]
+            ctrl = train_mod.train_topk_sae(X, d_sae * nseeds, k, seed=0,
+                                            steps=steps, batch=4096)
+            decs = [sae_mod.get_decoder(s) for s in seeds]
+            du, dc = np.vstack(decs), sae_mod.get_decoder(ctrl)
+            sng, uni, ctl = [], [], []
+            for shape in shapes:
+                tgt = synthetic.first_of_shape(manifolds, shape)
+                probe, _ = synthetic.probe_in_context(tgt, manifolds, k_active=4,
+                                                      n_probe=512, noise_sigma=0.0)
+                cs = [sae_mod.encode_sae(s, probe) for s in seeds]
+                sng.append(np.mean([metrics.auc(
+                    metrics.greedy_codes(probe, decs[i], cs[i], 8), 8)
+                    for i in range(nseeds)]))
+                uni.append(metrics.auc(metrics.greedy_codes(probe, du, np.hstack(cs), 8), 8))
+                ctl.append(metrics.auc(
+                    metrics.greedy_codes(probe, dc, sae_mod.encode_sae(ctrl, probe), 8), 8))
+            rows.append((corr, float(np.mean(sng)), float(np.mean(uni)),
+                         float(np.mean(ctl))))
+        return rows
+
+    def corr_or_cached(key, force):
+        if key in _CORR_CACHE:
+            return _CORR_CACHE[key]
+        if not force:
+            return None
+        _CORR_CACHE[key] = _corr_sweep(*key)
+        return _CORR_CACHE[key]
+
+    return (corr_or_cached,)
+
+
+@app.cell
+def _(c, corr_or_cached, expansion, ksae, mo, nseeds, plt, run_corr, steps):
+    _key = (c.value, expansion.value, nseeds.value, steps.value, int(ksae.value))
+    with mo.status.spinner(title="Correlation sweep — training ~24 SAEs on CPU…"):
+        _rows = corr_or_cached(_key, run_corr.value)
+    mo.stop(
+        _rows is None,
+        mo.md("### Click **Run the correlation sweep** (uses c / width / # seeds / k above)"),
+    )
+
+    _cr = [r[0] for r in _rows]
+    _single = [r[1] for r in _rows]
+    _union = [r[2] for r in _rows]
+    _control = [r[3] for r in _rows]
+
+    _fig, _ax = plt.subplots(figsize=(8, 5))
+    _lu, = _ax.plot(_cr, _union, "o-", color="tab:red", lw=2, label="union (pooled seeds)")
+    _ls, = _ax.plot(_cr, _single, "^-", color="tab:green", label="single seed")
+    _lc, = _ax.plot(_cr, _control, "v--", color="tab:orange", label="width-matched control")
+    _ax.set_xlabel("corr  (within-group co-activation — structured entanglement)")
+    _ax.set_ylabel("restricted-R² capture (AUC over 8 atoms)")
+    _ax.set_title(f"k={int(ksae.value)}: capture holds, then correlated co-occurrence "
+                  f"entangles the group")
+    _ax.legend([_lu, _ls, _lc],
+               ["union (pooled seeds)", "single seed", "width-matched control"],
+               fontsize=8, loc="lower left")
+    _fig.tight_layout()
+    _fig
+    return
+
+
 if __name__ == "__main__":
     app.run()
