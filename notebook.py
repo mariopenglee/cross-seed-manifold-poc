@@ -597,15 +597,16 @@ def _(art, budget, metrics, mo, np, sae_mod):
     _, _a_r2, _ = metrics.greedy_codes_reconstruct(_probe, _dec_avg, _code_avg, _B)
     _recovered = float((_a_r2 - _s_r2) / _gap) if _gap > 1e-6 else float("nan")
 
-    if _gap <= 1e-3:
+    if _gap < 0.03:
         _out = mo.md(
             f"""
             **Union ≈ best single seed here** (union R²={_u_r2:.2f}, best single
-            R²={_s_r2:.2f}, gap {_gap:+.2f}). There's essentially no pooling benefit to
-            explain at this config — the SAE is roomy enough that one seed already
-            captures the manifold. Lower the capacity (raise **c**, or drop expansion /
-            **k**) so the union beats the single seed, then this section becomes
-            informative.
+            R²={_s_r2:.2f}, **U−S={_gap:+.2f}**). There's essentially no pooling benefit to
+            explain at this config, so the tiling vs. variance-reduction split isn't
+            meaningful — measures 1 and 4 are ratios of this near-zero gap, so they blow
+            up (the ±700% you may have seen). Push **k toward dilution** (higher k in §1),
+            or crowd more manifolds (higher **c**), until the union clearly beats a single
+            seed; then this section becomes informative.
             """
         )
     else:
@@ -620,6 +621,11 @@ def _(art, budget, metrics, mo, np, sae_mod):
                     if _tiling_votes >= 3 else
                     "**VARIANCE REDUCTION** — seeds mostly relearn the same atoms"
                     if _tiling_votes <= 1 else "**MIXED**")
+        # measures 1 & 4 are ratios of U−S, so raw values can run to ±hundreds of %;
+        # clip / categorise for a readable table (votes above still use raw values).
+        _gf_disp = f"{min(_frac_worst, 1.5) * 100:.0f}%" + ("+" if _frac_worst > 1.5 else "")
+        _rec_cat = ("averaging **hurts** (R² below single)" if _a_r2 < _s_r2 - 0.005
+                    else f"recovers **{min(max(_recovered, 0.0), 1.2) * 100:.0f}%**")
         _out = mo.md(
             f"""
             Best single seed R²={_s_r2:.2f} · union R²={_u_r2:.2f} · **U−S={_gap:+.2f}**
@@ -627,10 +633,10 @@ def _(art, budget, metrics, mo, np, sae_mod):
 
             | measure | value | tiling looks like | variance-reduction looks like |
             |---|---|---|---|
-            | **1. gap-fill** — share of improvement on the worst-25% single-seed points | **{_frac_worst*100:.0f}%** (null 25%); corr(res, improvement) **{_corr:+.2f}** | ≫ 25%, corr -> +1 | ≈ 25%, corr ≈ 0 |
+            | **1. gap-fill** — share of improvement on the worst-25% single-seed points | **{_gf_disp}** (null 25%); corr(res, improvement) **{_corr:+.2f}** | ≫ 25%, corr -> +1 | ≈ 25%, corr ≈ 0 |
             | **2. composition** — distinct seeds feeding the union's top-{_B} | **{_n_distinct}/{_n}** &nbsp; counts {_counts.tolist()} | several seeds | one seed dominates |
             | **3. atom overlap** — nearest-neighbour \\|cos\\| | cross **{_cross_ov:.2f}** vs within **{_within_ov:.2f}** | cross ≲ within | cross ≫ within (copies) |
-            | **4. aligned-average** — gain recovered by averaging | R²={_a_r2:.2f} -> **{_recovered*100:.0f}%** | little (can't add coverage) | ~100% (denoising) |
+            | **4. aligned-average** — gain recovered by averaging | avg R²={_a_r2:.2f} (single {_s_r2:.2f}) — {_rec_cat} | little (can't add coverage) | ~100% (denoising) |
 
             The map below colors each manifold point by how much the union improves it — a
             **tiling** union concentrates its help on the regions the best single seed
