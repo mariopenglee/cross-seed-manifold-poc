@@ -121,8 +121,10 @@ def _(mo):
 
     Pick a regime and click **Train**. The union pools `N` seeds; the control is a
     *single* SAE with `N×` the width (same total atoms **and** compute). The first
-    click trains `N+1` small SAEs on CPU (**~20–60s** — you'll see a spinner). Training
-    is cached, so the sliders below won't retrain unless you change a training knob.
+    click trains `N+1` small SAEs on CPU (**~20–60s** — you'll see a spinner). The SAEs
+    train on the full mixture of *all* manifolds, so they're **shared across target
+    shapes** — switching the shape (Section 1) just re-probes, instantly. Only the
+    training knobs below (c / width / k / # seeds / steps) trigger a retrain.
 
     **Defaults reproduce Bhalla et al.'s synthetic benchmark** (c=48 manifolds in
     d=128, SAE width 512 = ×4, k=4, 4 co-active per sample). The legend below says which
@@ -166,7 +168,9 @@ def _(mo):
 def _(np, sae_mod, synthetic, train_mod):
     _CACHE = {}
 
-    def _train_all(shape_name, c, expansion, k, nseeds, steps):
+    def _train_all(c, expansion, k, nseeds, steps):
+        # SAEs train on the full mixture (all manifolds), so this is independent of
+        # which target shape you later probe — the cache key omits the shape.
         d = 128
         manifolds = synthetic.build_dictionary(c=c, d=d, seed=0)
         X = synthetic.generate_dataset(
@@ -181,13 +185,9 @@ def _(np, sae_mod, synthetic, train_mod):
             X, d_sae * nseeds, k, seed=0, steps=steps, batch=4096
         )
         decs = [sae_mod.get_decoder(s) for s in seeds]
-        target = synthetic.first_of_shape(manifolds, shape_name)
-        probe, _ = synthetic.probe_in_context(
-            target, manifolds, k_active=4, n_probe=512, noise_sigma=0.0
-        )
         return dict(
             seeds=seeds, ctrl=ctrl, decs=decs, dec_union=np.vstack(decs),
-            dec_ctrl=sae_mod.get_decoder(ctrl), target=target, probe=probe,
+            dec_ctrl=sae_mod.get_decoder(ctrl), manifolds=manifolds,
             k=k, d_sae=d_sae,
         )
 
@@ -203,23 +203,29 @@ def _(np, sae_mod, synthetic, train_mod):
 
 
 @app.cell
-def _(c, expansion, ksae, mo, nseeds, run, shape, steps, train_or_cached):
-    key = (shape.value, c.value, expansion.value, int(ksae.value),
-           nseeds.value, steps.value)
+def _(c, expansion, ksae, mo, nseeds, run, shape, steps, synthetic, train_or_cached):
+    key = (c.value, expansion.value, int(ksae.value), nseeds.value, steps.value)
     with mo.status.spinner(title="Training SAEs on CPU… (~20–60s)"):
-        art = train_or_cached(key, run.value)
+        _trained = train_or_cached(key, run.value)
     mo.stop(
-        art is None,
+        _trained is None,
         mo.md("### Set parameters and click **Train SAEs**"),
     )
+    # Changing the target shape does NOT retrain — the SAEs are shared across shapes;
+    # we just re-probe the chosen manifold here (instant).
+    _target = synthetic.first_of_shape(_trained["manifolds"], shape.value)
+    _probe, _ = synthetic.probe_in_context(
+        _target, _trained["manifolds"], k_active=4, n_probe=512, noise_sigma=0.0
+    )
+    art = {**_trained, "target": _target, "probe": _probe}
     _e = art["target"].e
     _regime = ("sparse / shattering-prone" if art["k"] < _e else
                "capture regime (paper sweet-spot, k≈dim)" if art["k"] <= 8 * _e else
                "dilution regime")
     mo.md(
         f"Trained **{nseeds.value} seeds** (width {art['d_sae']}) + a width-"
-        f"{art['d_sae'] * nseeds.value} control on shape **{shape.value}** "
-        f"(span dim e={_e}, k={art['k']}) -> **{_regime}**."
+        f"{art['d_sae'] * nseeds.value} control — **shared across shapes**; now probing "
+        f"**{shape.value}** (span dim e={_e}, k={art['k']}) -> **{_regime}**."
     )
     return (art,)
 
@@ -609,8 +615,7 @@ def _(PCA, art, budget, metrics, np, plt, sae_mod):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
     ## 7 · The headline — where does pooling help across the sparsity regime?
 
     Sections 2–6 explored **one** value of `k`. This sweeps `k` (the paper's regime
@@ -629,8 +634,7 @@ def _(mo):
     spanning it, so a wider SAE captures *worse*. Pooling's edge over a single seed grows
     as `k` drives it into dilution (ρ falls). ~20 small SAEs → **~2–4 min** first run
     (cached afterwards).
-    """
-    )
+    """)
     return
 
 
@@ -735,8 +739,7 @@ def _(c, expansion, ksweep_or_cached, mo, nseeds, plt, run_ksweep, steps):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
     ## 8 · Structured entanglement — correlated co-activation
 
     So far concepts co-fire **independently** (4 random manifolds per sample). Real
@@ -751,8 +754,7 @@ def _(mo):
     capture holds flat until ~0.85, then crashes, and the wide **control drops below a
     single seed** (the capacity pathology) right at the break. Clearest at a capture `k`
     (small k). ~24 SAEs → **~3–4 min** first run (cached afterwards).
-    """
-    )
+    """)
     return
 
 
