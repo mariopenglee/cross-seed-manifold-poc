@@ -92,6 +92,21 @@ def _random_params(shape, rng):
     return {}
 
 
+def _grid_params(shape, v, n=6):
+    """Deterministic 6-variant parameter grid per shape (``v`` in 0..n-1), matching the
+    paper's *systematic* 'six parameter variants per type' rather than random draws. The
+    grid spans the same ranges as ``_random_params``. Parameter-free shapes (line, circle,
+    disk, sphere, mobius) have no variants — they differ only by their random embedding."""
+    t = v / (n - 1) if n > 1 else 0.0            # 0..1 across the variants
+    if shape == "helix":
+        return dict(turns=1.5 + 2.0 * t, pitch=0.5 + 1.5 * t)
+    if shape == "torus":
+        return dict(R=1.5 + 1.5 * t, r=0.4 + 0.6 * t)
+    if shape == "swiss_roll":
+        return dict(height=1.0 + 2.0 * t)
+    return {}
+
+
 def _random_orthonormal(e, d, rng):
     """Random matrix [e, d] with orthonormal rows (e <= d)."""
     g = rng.normal(size=(d, e))
@@ -117,13 +132,17 @@ class Manifold:
 
 
 def build_dictionary(c=C, d=D, seed=0):
-    """Build ``c`` manifolds cycling through the 8 shape types."""
+    """Build ``c`` manifolds cycling through the 8 shape types. Shape parameters follow
+    the paper's deterministic 6-variant grid (variant = which pass through the shape
+    cycle); position (origin), rotation (random ``V_i``) and unit-RMS size match the
+    paper's ``x = Σ_i z_i V_i`` construction."""
     rng = np.random.default_rng(seed)
     manifolds = []
+    n_shapes = len(SHAPE_TYPES)
     for i in range(c):
-        shape = SHAPE_TYPES[i % len(SHAPE_TYPES)]
+        shape = SHAPE_TYPES[i % n_shapes]
         e = SHAPE_EMBED_DIM[shape]
-        params = _random_params(shape, rng)
+        params = _grid_params(shape, (i // n_shapes) % 6)
         V = _random_orthonormal(e, d, rng)
         # rescale to unit RMS: scale = 1 / rms(embedded canonical sample)
         emb = (_sample_canonical(shape, 4096, rng, params) @ V)

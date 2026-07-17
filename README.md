@@ -68,6 +68,16 @@ simply having several independent SAEs to pool and half from the seed difference
 itself — averaging aligned seeds does not reproduce it, so the seeds cover complementary
 regions rather than denoising a shared solution.
 
+A second lens tells the same story. Instead of "how many atoms to reconstruct a
+manifold," ask "how many manifolds does one atom respond to" (a per-atom polysemanticity
+score; the notebook's splintering section). Where a single SAE captures compactly the
+atoms are near-monosemantic; in dilution they smear across several manifolds. Across
+seeds, the *amount* of this smearing is nearly constant, but *which* manifolds a given
+seed smears varies — so pooling seeds tends to cover manifolds that any one seed
+fractures. This is a re-description of the same dilution-regime benefit, not independent
+evidence, and it does **not** establish that pooling beats a single equally-wide SAE —
+that comparison rests on the width-matched control, which is unreliable (above).
+
 None of this has been tested on a real model, where the manifold geometry is unknown.
 
 ![single / union / width-matched control capture vs. sparsity k](results/figures/ksweep_crossseed.png)

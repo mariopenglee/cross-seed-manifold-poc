@@ -253,8 +253,22 @@ def _(PCA, np, plt, shape, synthetic):
 
 
 @app.cell
-def _(c, d_ambient, expansion, instance_sel, k_active, ksae, mo, noise, nseeds,
-      run, shape, steps, synthetic, train_or_cached):
+def _(
+    c,
+    d_ambient,
+    expansion,
+    instance_sel,
+    k_active,
+    ksae,
+    mo,
+    noise,
+    nseeds,
+    run,
+    shape,
+    steps,
+    synthetic,
+    train_or_cached,
+):
     key = (c.value, d_ambient.value, expansion.value, int(ksae.value), nseeds.value,
            steps.value, k_active.value, round(noise.value, 3))
     with mo.status.spinner(title="Training SAEs on CPU… (~20–60s)"):
@@ -773,8 +787,19 @@ def _(metrics, np, sae_mod, synthetic, train_mod):
 
 
 @app.cell
-def _(c, d_ambient, expansion, k_active, ksweep_or_cached, mo, noise, nseeds, plt,
-      run_ksweep, steps):
+def _(
+    c,
+    d_ambient,
+    expansion,
+    k_active,
+    ksweep_or_cached,
+    mo,
+    noise,
+    nseeds,
+    plt,
+    run_ksweep,
+    steps,
+):
     _key = (c.value, d_ambient.value, expansion.value, nseeds.value, steps.value,
             k_active.value, round(noise.value, 3))
     with mo.status.spinner(title="Sweeping k — training ~20 SAEs on CPU…"):
@@ -908,8 +933,20 @@ def _(metrics, np, sae_mod, synthetic, train_mod):
 
 
 @app.cell
-def _(c, corr_or_cached, d_ambient, expansion, k_active, ksae, mo, noise, nseeds, plt,
-      run_corr, steps):
+def _(
+    c,
+    corr_or_cached,
+    d_ambient,
+    expansion,
+    k_active,
+    ksae,
+    mo,
+    noise,
+    nseeds,
+    plt,
+    run_corr,
+    steps,
+):
     _key = (c.value, d_ambient.value, expansion.value, nseeds.value, steps.value,
             int(ksae.value), k_active.value, round(noise.value, 3))
     with mo.status.spinner(title="Correlation sweep — training ~24 SAEs on CPU…"):
@@ -942,8 +979,7 @@ def _(c, corr_or_cached, d_ambient, expansion, k_active, ksae, mo, noise, nseeds
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
     ## 9 · Splintering — is each atom on one manifold, or several?
 
     For one seed's SAE, we measure how much each **atom's code varies as each manifold
@@ -953,8 +989,7 @@ def _(mo):
     sweet-spot atoms specialise; push **k** into dilution and they smear across many —
     and (from a separate control) this is driven by sparsity `k`, *not* by how much the
     manifolds' subspaces overlap.
-    """
-    )
+    """)
     return
 
 
@@ -990,8 +1025,84 @@ def _(art, mo, np, plt, sae_mod, synthetic):
 
 @app.cell
 def _(mo):
-    mo.md(
-        r"""
+    mo.md(r"""
+    ### 9b · Splintering across seeds — same *amount*, different *cuts*
+
+    The panel above is one seed. Across the trained seeds, two facts fall out (clearest if you
+    push **k** into dilution, e.g. 32):
+
+    - **Left** — the per-seed polysemanticity histograms sit almost on top of each other: the
+      *amount* of splintering is set by **k**, not the seed (mono-fraction varies only ~±2%).
+    - **Right** — but *which* manifolds each seed cleanly captures differs. A manifold is
+      "cleanly captured" if some atom is **>90% selective** to it. A single seed cleans some
+      number; the **union** of seeds cleans many more — pooling recovers manifolds that any one
+      seed splinters. At a capture **k** this bar is flat (seeds redundant); in dilution it
+      opens up. *This is the cross-seed pooling benefit, seen through the splintering lens: seeds
+      shatter by the same amount but along different cuts, so the union covers what each loses.*
+    """)
+    return
+
+
+@app.cell
+def _(art, mo, np, plt, sae_mod, synthetic):
+    _mans, _seeds, _THR = art["manifolds"], art["seeds"], 0.90
+
+    def _purity_and_pr(_sae):
+        _S = np.zeros((art["d_sae"], len(_mans)), np.float32)
+        for _i, _m in enumerate(_mans):
+            _p, _ = synthetic.probe_in_context(_m, _mans, k_active=art["k_active"],
+                                                n_probe=512, noise_sigma=0.0)
+            _S[:, _i] = sae_mod.encode_sae(_sae, _p).std(0)
+        _alive = _S.sum(1) > 1e-6
+        _Pn = _S[_alive] / _S[_alive].sum(1, keepdims=True)
+        _pr = 1.0 / (_Pn ** 2).sum(1)                      # effective # manifolds / atom
+        _amax, _best = _Pn.argmax(1), _Pn.max(1)
+        _pur = np.array([float(_best[_amax == _i].max()) if (_amax == _i).any() else 0.0
+                         for _i in range(len(_mans))], np.float32)
+        return _pr, _pur
+
+    _prs, _purs, _monos = [], [], []
+    for _sae in _seeds:
+        _pr, _pur = _purity_and_pr(_sae)
+        _prs.append(_pr); _purs.append(_pur); _monos.append(float((_pr < 1.5).mean()))
+    _purity = np.stack(_purs)                              # [seed, manifold]
+    _clean = _purity > _THR
+    _single = float(_clean.sum(1).mean())                 # avg cleanly captured by one seed
+    _union = int(_clean.any(0).sum())                     # cleanly captured by >=1 seed
+
+    _fig, (_axl, _axr) = plt.subplots(1, 2, figsize=(11, 4.2))
+    _bins = np.arange(1, 8.5, 0.5)
+    for _s, _pr in enumerate(_prs):
+        _axl.hist(_pr, bins=_bins, histtype="step", lw=1.8, label=f"seed {_s}")
+    _axl.axvline(1, color="k", lw=0.8, ls=":")
+    _axl.set(xlabel="effective # manifolds / atom (PR)", ylabel="# atoms",
+             title=f"amount of splintering is seed-invariant  "
+                   f"(mono% {np.mean(_monos)*100:.0f} +/- {np.std(_monos)*100:.0f})")
+    _axl.legend(fontsize=7)
+
+    _axr.bar(["single seed\n(avg)", f"union of {len(_seeds)}"], [_single, _union],
+             color=["tab:green", "tab:red"])
+    _axr.set(ylabel=f"manifolds cleanly captured (purity > {_THR})", ylim=(0, len(_mans)),
+             title=f"which manifolds splinter differs by seed  "
+                   f"(pooling +{_union - _single:.0f} of {len(_mans)})")
+    for _x, _v in enumerate([_single, _union]):
+        _axr.text(_x, _v + 0.4, f"{_v:.0f}", ha="center", fontsize=11)
+    _fig.tight_layout()
+
+    mo.vstack([
+        mo.md(f"**k={art['k']}** · single seed cleans **{_single:.0f}/{len(_mans)}**, "
+              f"union of {len(_seeds)} cleans **{_union}/{len(_mans)}** "
+              f"(**+{_union - _single:.0f}**). Per-manifold purity std across seeds: "
+              f"**{_purity.std(0).mean():.3f}** (0 = identical splintering). At the default "
+              f"capture **k** the two bars match; push **k** to 32 to open the gap."),
+        _fig,
+    ])
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
     ## 10 · Recovering manifolds from the fractured atoms
 
     Can we group the fractured atoms back into their manifolds *unsupervised*? We cluster
@@ -1000,8 +1111,7 @@ def _(mo):
     capture (atoms monosemantic), hard in dilution (polysemantic atoms resist clustering).
     *(The paper does this with conditional "Ising" couplings — L1-pseudolikelihood; on this
     toy plain co-activation works about as well once tuned, so we use it here.)*
-    """
-    )
+    """)
     return
 
 
