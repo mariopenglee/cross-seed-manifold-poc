@@ -169,7 +169,7 @@ def _(np, sae_mod, synthetic, train_mod):
         return dict(
             seeds=seeds, ctrl=ctrl, decs=decs, dec_union=np.vstack(decs),
             dec_ctrl=sae_mod.get_decoder(ctrl), manifolds=manifolds,
-            k=k, d_sae=d_sae, k_active=k_active,
+            k=k, d_sae=d_sae, k_active=k_active, Xsample=X[:4000],
         )
 
     def train_or_cached(key, force):
@@ -937,6 +937,120 @@ def _(c, corr_or_cached, d_ambient, expansion, k_active, ksae, mo, noise, nseeds
                fontsize=8, loc="lower left")
     _fig.tight_layout()
     _fig
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## 9 · Splintering — is each atom on one manifold, or several?
+
+    For one seed's SAE, we measure how much each **atom's code varies as each manifold
+    sweeps** (the others held fixed), then compute the *effective number of manifolds an
+    atom responds to* (participation ratio): **~1 = monosemantic** (the atom is learned on
+    one specific manifold), **>1 = polysemantic** (it spans several). At the capture
+    sweet-spot atoms specialise; push **k** into dilution and they smear across many —
+    and (from a separate control) this is driven by sparsity `k`, *not* by how much the
+    manifolds' subspaces overlap.
+    """
+    )
+    return
+
+
+@app.cell
+def _(art, mo, np, plt, sae_mod, synthetic):
+    _sae, _mans = art["seeds"][0], art["manifolds"]
+    _S = np.zeros((art["d_sae"], len(_mans)), np.float32)
+    for _i, _m in enumerate(_mans):
+        _p, _ = synthetic.probe_in_context(_m, _mans, k_active=art["k_active"],
+                                            n_probe=512, noise_sigma=0.0)
+        _S[:, _i] = sae_mod.encode_sae(_sae, _p).std(0)
+    _alive = _S.sum(1) > 1e-6
+    _Pn = _S[_alive] / _S[_alive].sum(1, keepdims=True)
+    _poly = 1.0 / (_Pn ** 2).sum(1)              # effective # manifolds per atom
+    _mono = float((_poly < 1.5).mean())
+    _med = float(np.median(_poly))
+
+    _fig, _ax = plt.subplots(figsize=(7.5, 4.2))
+    _ax.hist(_poly, bins=np.arange(1, 8.5, 0.5), color="tab:purple", alpha=0.85)
+    _ax.axvline(1, color="k", lw=0.8, ls=":")
+    _ax.set(xlabel="effective # manifolds an atom responds to", ylabel="# atoms",
+            title=f"seed 0, k={art['k']}: {_mono*100:.0f}% monosemantic, "
+                  f"median {_med:.2f} manifolds/atom")
+    _fig.tight_layout()
+    mo.vstack([
+        mo.md(f"**{int(_alive.sum())} live atoms** · **{_mono*100:.0f}% monosemantic** "
+              f"(respond to ~1 manifold) · median **{_med:.2f}** manifolds/atom. Capture k "
+              f"-> ~1 (atoms specialise); dilution -> climbs (atoms smear across manifolds)."),
+        _fig,
+    ])
+    return
+
+
+@app.cell
+def _(mo):
+    mo.md(
+        r"""
+    ## 10 · Recovering manifolds from the fractured atoms
+
+    Can we group the fractured atoms back into their manifolds *unsupervised*? We cluster
+    atoms by how they **co-fire** across the data, into as many groups as there are
+    manifolds, and score against each atom's true manifold (**ARI**, 1 = perfect). Easy at
+    capture (atoms monosemantic), hard in dilution (polysemantic atoms resist clustering).
+    *(The paper does this with conditional "Ising" couplings — L1-pseudolikelihood; on this
+    toy plain co-activation works about as well once tuned, so we use it here.)*
+    """
+    )
+    return
+
+
+@app.cell
+def _(art, mo, np, sae_mod, synthetic):
+    from scipy.cluster.hierarchy import linkage, fcluster
+    from scipy.spatial.distance import squareform
+    from scipy.special import comb
+
+    _sae, _mans = art["seeds"][0], art["manifolds"]
+    _Z = sae_mod.encode_sae(_sae, art["Xsample"])
+    _keep = np.where((_Z > 0).mean(0) > 0.01)[0]
+    mo.stop(len(_keep) < 4,
+            mo.md("### Too few live atoms to cluster — train first, or lower **k**."))
+    _Zk = _Z[:, _keep]
+
+    _S = np.zeros((art["d_sae"], len(_mans)), np.float32)   # ground-truth selectivity
+    for _i, _m in enumerate(_mans):
+        _p, _ = synthetic.probe_in_context(_m, _mans, k_active=art["k_active"],
+                                            n_probe=512, noise_sigma=0.0)
+        _S[:, _i] = sae_mod.encode_sae(_sae, _p).std(0)
+    _true = _S[_keep].argmax(1)
+    _K = len(np.unique(_true))
+
+    _A = np.nan_to_num(np.abs(np.corrcoef(np.where(_Zk > 0, 1.0, -1.0).T)))
+    np.fill_diagonal(_A, 0.0)
+    _A = _A / (_A.max() + 1e-12)
+    _dist = 1.0 - _A
+    np.fill_diagonal(_dist, 0.0)
+    _lab = fcluster(linkage(squareform(_dist, checks=False), method="average"),
+                    t=_K, criterion="maxclust")
+
+    _ua = np.unique(_true, return_inverse=True)[1]
+    _ub = np.unique(_lab, return_inverse=True)[1]
+    _cont = np.zeros((_ua.max() + 1, _ub.max() + 1), int)
+    for _i in range(len(_true)):
+        _cont[_ua[_i], _ub[_i]] += 1
+    _s = comb(_cont, 2).sum()
+    _ai, _bj = comb(_cont.sum(1), 2).sum(), comb(_cont.sum(0), 2).sum()
+    _exp = _ai * _bj / comb(len(_true), 2)
+    _ari = float((_s - _exp) / (0.5 * (_ai + _bj) - _exp + 1e-12))
+    _pur = float(sum(np.bincount(_true[_lab == _c]).max()
+                     for _c in np.unique(_lab)) / len(_true))
+    _verdict = ("**easy** — atoms cluster cleanly into their manifolds" if _ari > 0.7 else
+                "**moderate**" if _ari > 0.4 else
+                "**hard** — fractured, polysemantic atoms resist clustering")
+    mo.md(f"Clustering **{len(_keep)} atoms** into **{_K}** groups by co-activation → "
+          f"**ARI = {_ari:.2f}**, purity = {_pur:.2f} vs. ground truth → {_verdict}. "
+          f"(k={art['k']}; push k up and watch it get harder.)")
     return
 
 
